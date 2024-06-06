@@ -10,7 +10,7 @@ app = Flask(__name__)
 CORS(app, origins="*")  # Enable CORS for all routes
 
 
-
+openai.api_key = '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'
 
 
 
@@ -57,23 +57,27 @@ def connect_to_database_old():
 
 
 
-
-# Route to handle the POST request to execute a query
-@app.route('/execute_query', methods=['POST'])
-def execute_query():
+def execute_query(query):
     try:
-        data = request.json
-        query = data['query']
-        connection = get_db_connection()
+        connection = g.db_connection
         cursor = connection.cursor()
         cursor.execute(query)
-        results = cursor.fetchall()
-        cursor.close()
-        return jsonify(results), 200
+        
+        if query.strip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            connection.commit()
+        
+        if query.strip().upper().startswith("INSERT"):
+            return None, None  # No column names or data to return for INSERT queries
+        else:
+            column_names = [desc[0] for desc in cursor.description]  # Get column names
+            data = cursor.fetchall()  # Get data
+            cursor.close()
+            return column_names, data
+    
     except Exception as e:
-        return jsonify({"error": f"Error executing query: {e}"}), 500
-
-
+        error_message = f"Error executing query: {e}"
+        # You can log the error or handle it as needed
+        return None, error_message
 
 
 
@@ -199,17 +203,41 @@ def gen_response(request_string, user_query, table_schema, query_result):
         messages = [
                 {"role": "system", "content": f"You are a helpful technical SQL assistant. {request_string}"},
                 {"role": "system", "content": f"This is the table info and schema in this database: '{table_schema}'"},
-                {"role": "user", "content": f"Use this history of conversation to continue chat: {prepare_history()}"},
                 {"role": "user", "content": f"Use these query results to analyze: {query_result}"},
                 {"role": "user", "content": f"User Query: '{user_query}'"}
-                    
+
+            ]
+        )
+
+        return response
+    except Exception as e:
+        raise Exception(f"Error generating response: {e}")
+
+
+
+
+
+# This is for testing purposes
+@app.route('/gen', methods=['POST'])
+# Providing prompt to GPT for response generation
+def gen():
+    try:
+        # Get the user query from the request data
+        user_input = request.json.get('query')
+
+
+        response = openai.ChatCompletion.create(
+        model = "gpt-3.5-turbo",
+        messages = [
+                {"role": "system", "content": f"You are a helpful bot"},
+                {"role": "user", "content": f"User Query: '{user_input}'"}
+
             ]
         )
         
-        return response
+        return jsonify({"message": f"{response.choices[0].message['content'].strip()}"}), 200
     except Exception as e:
-        st.error(f"An error occurred: {e}")
-
+        raise Exception(f"Error generating response: {e}")
 
 
 
@@ -223,6 +251,7 @@ def generate_response():
     try:
         # Get the user query from the request data
         user_input = request.json.get('query')
+        show_result_summary = True
 
         # Ensure a query was provided
         if not user_input:
@@ -241,23 +270,25 @@ def generate_response():
 
         db_type = "MySQL"
 
+        #return jsonify({"message": f"{table_schemas_str}"}), 200
+
         # Get the response from first phase query (To get SQL query which needs to be processed)
         sql_query = gen_response(f"Translate this English sentence to {db_type} query. Do not ask users to provide SQL query. If you're unsure of the table or any such inputs dont give any SQL query just ask the user to provide that information. Also if there are multiple tables with similar names prompt user to choose the table from which user wants answers also display the similar table names. But do try to follow the history to know the table",user_input, table_schemas_str,"")
             
         # Check if there is SQL query present and the SQL query 
         isSQL, sql_query = extract_sql_query(sql_query.choices[0].message['content'].strip())
-
+        #return jsonify({"message": f"{sql_query}"}), 200
         # If SQL query is present we process it to fetch values 
         if isSQL:
             columns, data = execute_query(sql_query)
 
-                
-
+            #return jsonify({"message": f"{data}"}), 200      
             # Formats the sql query output into string format so that it can be feeded into LLM
             # It takes two more parameters with data i.e. start index and end index
             # This is used to limit the amount of results to be included 
             results_string = format_data(data, 0, 10)
             #print(results_string)
+            #jsonify({"message": f"{results_string}"}), 200
 
             # Converts the query output to markdown table to display in message
             markdown_table = convert_to_markdown_table(columns, data)
@@ -267,13 +298,17 @@ def generate_response():
                 output = gen_response("According to the SQL response answer user query do not return SQL query only describe the query output. Use the table schema info to answer questions if asked questions related to that information. If there are table values first describe a little then display values in list order. If table information is missing respond it's empty or can't be fetched:",user_input, table_schemas_str, results_string)
                 output = output.choices[0].message['content'].strip()
 
-                output = f"""SQL Query:\n```sql\n{sql_query}\n```\n\nAnswer:\n\n{output}\n\n\nTabular: \n{markdown_table}"""
+                #output = f"""SQL Query:\n```sql\n{sql_query}\n```\n\nAnswer:\n\n{output}\n\n\nTabular: \n{markdown_table}"""
                 return jsonify({"message": f"{output}\n", "code":f"\n```sql\n{sql_query}\n```", "table":f"\n{markdown_table}"}), 200
             else:
-                output = f"""SQL Query:\n```sql\n{sql_query}\n```\n\n\nTabular: \n{markdown_table}"""
+                #output = f"""SQL Query:\n```sql\n{sql_query}\n```\n\n\nTabular: \n{markdown_table}"""
                 return jsonify({"message": f"", "code":f"\n```sql\n{sql_query}\n```", "table":f"\n{markdown_table}"}), 200
 
-    
+        # Else show the non sql response 
+        else:
+            output = f"""{sql_query}""" 
+            #output = f"""SQL Query:\n```sql\n{sql_query}\n```\n\nAnswer:\n\n{output}\n\n\nTabular: \n{markdown_table}"""
+            return jsonify({"message": f"{output}"}), 200
     except Exception as e:
         return jsonify({"error": f"Error executing query: {e}"}), 500
 
