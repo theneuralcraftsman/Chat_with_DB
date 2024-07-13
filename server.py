@@ -10,7 +10,7 @@ app = Flask(__name__)
 CORS(app, origins="*")  # Enable CORS for all routes
 
 
-openai.api_key = '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'
+openai.api_key = 'OPENAI_API_KEY'
 
 
 
